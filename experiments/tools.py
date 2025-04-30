@@ -4,7 +4,7 @@ import gradio as gr
 import requests
 import inspect
 import pandas as pd
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Literal
 from huggingface_hub import InferenceClient, login, list_models
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFacePipeline
 #from langchain.schema import AIMessage, HumanMessage
@@ -17,6 +17,7 @@ import datasets
 import re
 from langgraph.graph import START, END, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.errors import GraphRecursionError
 from langchain.tools import Tool
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 from langchain_community.tools import DuckDuckGoSearchRun, DuckDuckGoSearchResults
@@ -45,9 +46,20 @@ llm = HuggingFaceEndpoint(
 class State(TypedDict):
     question: str
     article_content: str
+    attempts: int  # Track fetch attempts
+    tried_urls: list  # Track attempted URLs
     youtube_url: str
     answer: str
     messages: Annotated[list, add_messages]
+
+
+def should_retry(state: State) -> Literal["fetch_wikipedia", END]:
+    if state["answer"] and "not found" not in state["answer"].lower():
+        return END
+    if state["attempts"] >= 5:  # Fallback after 5 attempts
+        return END
+    return "fetch_wikipedia"
+
 
 def should_fetch_wikipedia(question):
     """
@@ -124,20 +136,45 @@ def get_wikipedia_article_full_text(search_query):
         return None
 
 def fetch_wikipedia_content(state: State) -> State:
+    # Initialize attempts if not present
+    state.setdefault("attempts", 0)
+    state.setdefault("tried_urls", [])
+    
     try:
-        article_content = get_wikipedia_article_full_text(state["question"])
-        if not article_content:
-            raise ValueError("No Wikipedia article found")
-            
+        # Increment attempt counter
+        state["attempts"] += 1
+        
+        # Get search results (modified to skip tried URLs)
+        search_query = state["question"].replace(" based on wikipedia", "").strip()
+        res = DDGS().text(f"{search_query} wikipedia", max_results=10)
+        hrefs = [r['href'] for r in res]
+        
+        # Filter Wikipedia URLs and exclude already tried ones
+        wiki_urls = filter_wikipedia_urls(hrefs)
+        untried_urls = [url for url in wiki_urls if url not in state["tried_urls"]]
+        
+        if not untried_urls:
+            raise ValueError(f"No new Wikipedia URLs found after {state['attempts']} attempts")
+        
+        # Try the first untrusted URL
+        selected_url = untried_urls[0]
+        state["tried_urls"].append(selected_url)
+        article_content = get_wikipedia_content_from_url(selected_url)
+        
         return {
             **state,
             "article_content": article_content,
-            "messages": state["messages"] + [{"role": "system", "content": "Wikipedia article fetched."}]
+            "messages": state["messages"] + [
+                {"role": "system", "content": f"Attempt {state['attempts']}: Fetched from {selected_url}"}
+            ]
         }
+        
     except Exception as e:
         return {
             **state,
-            "messages": state["messages"] + [{"role": "system", "content": f"Error: {str(e)}"}]
+            "messages": state["messages"] + [
+                {"role": "system", "content": f"Attempt {state['attempts']} failed: {str(e)}"}
+            ]
         }
 
 
