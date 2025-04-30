@@ -45,6 +45,7 @@ llm = HuggingFaceEndpoint(
 class State(TypedDict):
     question: str
     article_content: str
+    youtube_url: str
     answer: str
     messages: Annotated[list, add_messages]
 
