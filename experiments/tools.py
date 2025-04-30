@@ -109,26 +109,35 @@ def get_wikipedia_content_from_url(url):
     page = wikipedia.page(title)
     return page.content
 
-def get_wikipedia_article_full_text(search_query, language='en', max_results=10):
-    search_query += " wikipedia"
-
-    # Set the language (default is English)
-    res = DDGS().text(search_query, max_results=max_results)
-    hrefs = [r['href'] for r in res]
-    wiki_urls = filter_wikipedia_urls(hrefs)
-    if len(wiki_urls) == 0:
+def get_wikipedia_article_full_text(search_query):
+    try:
+        wikipedia.set_lang("en")
+        search_results = wikipedia.search(search_query)
+        if not search_results:
+            return None
+        page = wikipedia.page(search_results[0])
+        return page.content
+    except wikipedia.exceptions.DisambiguationError as e:
+        return wikipedia.page(e.options[0]).content
+    except wikipedia.exceptions.PageError:
         return None
-    else:
-        wiki_page = get_wikipedia_content_from_url(wiki_urls[0])
-        return wiki_page
 
 def fetch_wikipedia_content(state: State) -> State:
-    article_content = get_wikipedia_article_full_text(state["question"])
-    return {
-        **state,
-        "article_content": article_content,
-        "messages": state["messages"] + [{"role": "system", "content": "Wikipedia article fetched."}]
-    }
+    try:
+        article_content = get_wikipedia_article_full_text(state["question"])
+        if not article_content:
+            raise ValueError("No Wikipedia article found")
+            
+        return {
+            **state,
+            "article_content": article_content,
+            "messages": state["messages"] + [{"role": "system", "content": "Wikipedia article fetched."}]
+        }
+    except Exception as e:
+        return {
+            **state,
+            "messages": state["messages"] + [{"role": "system", "content": f"Error: {str(e)}"}]
+        }
 
 
 def answer_from_article(state: State) -> State:
